@@ -56,7 +56,8 @@ class Bond:
     face_value    : par value of the whole position (CZK thousands)
     coupon_rate   : annual coupon as a decimal (e.g. 0.035 = 3.5 %)
     maturity_years: remaining time to maturity (years)
-    market_price  : current dirty price per 100 of face value
+    market_price  : current dirty price per 100 of face value (calibrated to DCF model at base curve)
+    credit_spread : issuer credit spread over risk-free rate as a decimal (e.g. 0.0055 = 55 bps)
     """
     name: str
     issuer_type: str
@@ -64,7 +65,8 @@ class Bond:
     face_value: float
     coupon_rate: float
     maturity_years: float
-    market_price: float
+    market_price: float = 100.0
+    credit_spread: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +95,8 @@ ASSETS: List[Bond] = [
         face_value    = 50_000.0,
         coupon_rate   = 0.0350,
         maturity_years= 8.0,
-        market_price  = 99.8,
+        market_price  = 100.0000,
+        credit_spread = 0.0000,
     ),
     Bond(
         name          = "DE Govt 2.5 % 2032",
@@ -102,7 +105,8 @@ ASSETS: List[Bond] = [
         face_value    = 30_000.0,
         coupon_rate   = 0.0250,
         maturity_years= 6.0,
-        market_price  = 98.5,
+        market_price  = 94.6714,
+        credit_spread = 0.0000,
     ),
     Bond(
         name          = "Komerční Banka Covered 3.8 % 2031",
@@ -111,16 +115,18 @@ ASSETS: List[Bond] = [
         face_value    = 20_000.0,
         coupon_rate   = 0.0380,
         maturity_years= 5.0,
-        market_price  = 100.2,
+        market_price  = 100.2242,
+        credit_spread = 0.0025,
     ),
     Bond(
-        name          = "ČEZ Corp A 4.2 % 2036",
+        name          = "ČEZ Corp A 4.2 % 2038",
         issuer_type   = "CORP",
         rating        = "A",
         face_value    = 15_000.0,
         coupon_rate   = 0.0420,
         maturity_years= 12.0,
-        market_price  = 101.5,
+        market_price  = 101.4037,
+        credit_spread = 0.0055,
     ),
     Bond(
         name          = "Slovak Telekom BBB 5.1 % 2030",
@@ -129,6 +135,7 @@ ASSETS: List[Bond] = [
         face_value    = 10_000.0,
         coupon_rate   = 0.0510,
         maturity_years= 4.0,
-        market_price  = 100.0,
+        market_price  = 100.0000,
+        credit_spread = 0.0160,
     ),
 ]

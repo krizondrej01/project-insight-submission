@@ -13,9 +13,9 @@ This module computes two SCR sub-modules:
   2. SCR_spread         — spread widening shock on corporate/covered bonds
 
 Final SCR_market is obtained by aggregating the two sub-modules using the
-Solvency II correlation matrix (ρ = 0 between IR and Spread when IR_up
-dominates; ρ = 0.5 for IR_down scenario — simplified here to ρ = 0.25
-conservatively):
+Solvency II correlation matrix under Article 164(2) of Delegated Regulation
+(EU) 2015/35 (ρ = 0.00 between IR and Spread when IR_up dominates; ρ = 0.50
+when IR_down dominates):
 
     SCR_market = sqrt( SCR_ir² + SCR_spread² + 2·ρ·SCR_ir·SCR_spread )
 
@@ -100,12 +100,20 @@ GOVT_SPREAD_FACTOR = 0.00
 
 
 # ---------------------------------------------------------------------------
-# AGGREGATION CORRELATION  (simplified from Annex IV)
+# AGGREGATION CORRELATION  (Delegated Regulation (EU) 2015/35, Art. 164(2))
 # ---------------------------------------------------------------------------
-#korelace 2 rizik v jednom okamžiku - k maximálnímu krizovému šoku na úrokové sazby a k maximálnímu rozpadu kreditních spreadů teoreticky nemůže dojít v plné síle ve stejném okamžiku
-#TODO We set it to 0 here; the full model uses scenario-dependent correlation.
+# Korelace mezi úrokovým a spreadovým rizikem závisí na dominantním scénáři SCR_ir:
+#   - ρ = 0.00, pokud úrokovému riziku dominuje scénář růstu sazeb (UP).
+#   - ρ = 0.50, pokud úrokovému riziku dominuje scénář poklesu sazeb (DOWN).
 
-RHO_IR_SPREAD = 0.0
+RHO_IR_SPREAD_UP   = 0.00  # Art. 164(2): rho = 0.0 when IR UP shock dominates
+RHO_IR_SPREAD_DOWN = 0.50  # Art. 164(2): rho = 0.5 when IR DOWN shock dominates
+RHO_IR_SPREAD      = RHO_IR_SPREAD_DOWN  # Default for DOWN-dominated legacy book
+
+
+def get_ir_spread_correlation(dominant_scenario: str) -> float:
+    """Return regulatory correlation parameter per Art. 164(2) of (EU) 2015/35."""
+    return RHO_IR_SPREAD_UP if dominant_scenario == "UP" else RHO_IR_SPREAD_DOWN
 
 
 def _compute_of(curve: FlatYieldCurve, liabilities: list, bonds: list) -> float:
@@ -197,7 +205,7 @@ def scr_interest_rate(base_curve: FlatYieldCurve, liabilities: list, bonds: list
 # SUB-MODULE 2: Spread Risk SCR
 # ---------------------------------------------------------------------------
 
-def _modified_duration(bond: Bond) -> float:
+def _modified_duration(bond: Bond, base_curve: FlatYieldCurve = None) -> float:
     """
     Výpočet Modifikované durace dluhopisu (ModD = MacD / (1 + y)).
     
@@ -207,13 +215,14 @@ def _modified_duration(bond: Bond) -> float:
         Kapitálová zátěž = Tržní_Cena * SPREAD_FACTOR[rating] * ModD
     """
     # 1. Extrakce základních parametrů dluhopisu
-    # Převod splatnosti na celé roky (pro diskrétní roční cash-flow) a načtení kupónové sazby.
+    # Převod splatnosti na celé roky (pro diskrétní roční cash-flow), kupónové sazby a kreditního spreadu.
     T = int(round(bond.maturity_years))
     c = bond.coupon_rate
+    s = getattr(bond, "credit_spread", 0.0)
     
-    # 2. Aproximativní výnosová míra do splatnosti (Yield to Maturity)
-    # Nastavena na základní bezrizikovou sazbu 3,5 % p.a. - konzistence modelu
-    y = 0.035
+    # 2. Výnosová míra do splatnosti (Yield to Maturity = r_f(t) + credit_spread)
+    rf_T = base_curve.spot_rate(T) if base_curve is not None else 0.035
+    y = rf_T + s
 
     # 3. Akumulátory pro přítomnou hodnotu cash-flow (pv_sum) a vážený čas (wt_sum):
     pv_sum = 0.0
@@ -223,9 +232,11 @@ def _modified_duration(bond: Bond) -> float:
     for t in range(1, T + 1):
         # Algebraický trik: do posledního roku (t == T) přičteme ke kupónu i jistinu (1.0).
         cf  = c if t < T else (c + 1.0)
+        r_t = base_curve.spot_rate(t) if base_curve is not None else 0.035
+        y_t = r_t + s
         
-        # Diskontování cash-flow na přítomnou hodnotu (PV_t = CF_t / (1 + y)^t)
-        pv  = cf / (1.0 + y) ** t
+        # Diskontování cash-flow na přítomnou hodnotu (PV_t = CF_t / (1 + r_t + s)^t)
+        pv  = cf / (1.0 + y_t) ** t
         
         # Časově vážené cash-flow (t * PV_t) pro čitatele Macaulayovy durace
         pv_sum += pv
@@ -238,7 +249,7 @@ def _modified_duration(bond: Bond) -> float:
     return mac_dur / (1.0 + y)
 
 
-def scr_spread(bonds: list) -> dict:
+def scr_spread(bonds: list, base_curve: FlatYieldCurve = None) -> dict:
     """
     Výpočet celkového kapitálového požadavku na spreadové riziko (SCR_spread).
 
@@ -259,11 +270,24 @@ def scr_spread(bonds: list) -> dict:
         - "per_bond": seznam detailních výsledků pro každý dluhopis
         - "scr_spread_total": celkový součet kapitálových požadavků
     """
+    if base_curve is None:
+        curve = FlatYieldCurve(rate=0.035, label="Base (flat 3.5 %)")
+        av    = AssetValuation(curve)
+    elif isinstance(base_curve, AssetValuation):
+        av    = base_curve
+        curve = av.curve
+    else:
+        curve = base_curve
+        av    = AssetValuation(curve)
+
     per_bond = []
 
     for bond in bonds:
-        # 1. Převod procentuální tržní ceny na absolutní tržní hodnotu
-        mv = bond.face_value * bond.market_price / 100.0
+        # 1. Jednotný zdroj pravdy (Single Source of Truth):
+        # Tržní hodnota se počítá přímo přes AssetValuation(base_curve).price_bond(bond)
+        mv      = av.price_bond(bond)
+        bond.market_price = (mv / bond.face_value) * 100.0
+        mod_dur = _modified_duration(bond, curve)
 
         # 2. Určení zátěžového faktoru podle typu emitenta a ratingu
         if bond.issuer_type == "GOVT":
@@ -277,7 +301,6 @@ def scr_spread(bonds: list) -> dict:
                 base_factor *= COVERED_BOND_MULTIPLIER
             
             # Výpočet Modifikované durace a finálního šoku s horním stropem 100 % (1.0)
-            mod_dur = _modified_duration(bond)
             factor  = min(base_factor * mod_dur, 1.0)
 
         # 3. Absolutní kapitálový požadavek pro daný dluhopis (v tis. Kč / EUR)
@@ -288,7 +311,7 @@ def scr_spread(bonds: list) -> dict:
             "rating":      bond.rating,
             "issuer_type": bond.issuer_type,
             "mv_kczk":     mv,
-            "mod_dur":     _modified_duration(bond),
+            "mod_dur":     mod_dur,
             "factor":      factor,
             "charge_kczk": charge,
         })
@@ -306,11 +329,19 @@ def scr_spread(bonds: list) -> dict:
 # AGGREGATION: SCR_market
 # ---------------------------------------------------------------------------
 
-def aggregate_scr(scr_ir: float, scr_sp: float, rho: float = RHO_IR_SPREAD) -> float:
+def aggregate_scr(
+    scr_ir: float,
+    scr_sp: float,
+    rho: float = None,
+    dominant_scenario: str = "DOWN",
+) -> float:
     """
-    Agregace podmodulů tržního rizika podle standardního vzorce Solvency II (Článek 164).
-        SCR_market = sqrt( SCR_ir² + SCR_sp² + 2·ρ·SCR_ir·SCR_sp 
+    Agregace podmodulů tržního rizika podle standardního vzorce Solvency II (Článek 164(2)).
+        SCR_market = sqrt( SCR_ir² + SCR_sp² + 2·ρ·SCR_ir·SCR_sp )
     """
+    if rho is None:
+        rho = get_ir_spread_correlation(dominant_scenario)
+
     return float(np.sqrt(
         scr_ir ** 2
         + scr_sp ** 2

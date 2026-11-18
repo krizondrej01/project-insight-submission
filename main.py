@@ -25,7 +25,7 @@ from m1_portfolio import LIABILITIES, ASSETS
 from m2_valuation  import FlatYieldCurve, LiabilityValuation, AssetValuation, build_balance_sheet
 from m3_scr        import (
     scr_interest_rate, scr_spread, aggregate_scr, solvency_ratio,
-    IR_SHOCK_UP_BPS, IR_SHOCK_DOWN_BPS,
+    get_ir_spread_correlation, IR_SHOCK_UP_BPS, IR_SHOCK_DOWN_BPS,
 )
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "outputs")
@@ -114,6 +114,7 @@ for liab in LIABILITIES:
         "sum_assured_kczk": liab.sum_assured,
         "bel_kczk":         round(res["bel"], 2),
         "duration_yr":      round(res["duration"], 2),
+        "mod_duration_yr":  round(res["mod_duration"], 2),
     })
 
 _hr()
@@ -133,19 +134,22 @@ av = AssetValuation(base_curve)
 asset_mv_total = 0.0
 asset_rows = []
 for bond in ASSETS:
-    mv_mkt   = bond.face_value * bond.market_price / 100.0
+    # Single source of truth: DCF valuation via AssetValuation(base_curve)
     mv_model = av.price_bond(bond)
-    asset_mv_total += mv_mkt
+    bond.market_price = (mv_model / bond.face_value) * 100.0
+    mv_mkt   = mv_model
+    asset_mv_total += mv_model
     print(f"  {bond.name:<40}  {bond.rating:<6}  {bond.face_value:>12,.0f}  "
-          f"{bond.market_price:>8.1f}  {_kczk(mv_mkt)}")
+          f"{bond.market_price:>8.2f}  {_kczk(mv_mkt)}")
     asset_rows.append({
-        "name":            bond.name,
-        "issuer_type":     bond.issuer_type,
-        "rating":          bond.rating,
-        "face_value_kczk": bond.face_value,
-        "coupon_pct":      f"{bond.coupon_rate:.2%}",
-        "maturity_yr":     bond.maturity_years,
-        "market_price":    bond.market_price,
+        "name":              bond.name,
+        "issuer_type":       bond.issuer_type,
+        "rating":            bond.rating,
+        "face_value_kczk":   bond.face_value,
+        "coupon_pct":        f"{bond.coupon_rate:.2%}",
+        "credit_spread_bps": round(bond.credit_spread * 10_000, 1),
+        "maturity_yr":       bond.maturity_years,
+        "market_price":      round(bond.market_price, 4),
         "market_value_kczk": round(mv_mkt, 2),
         "model_value_kczk":  round(mv_model, 2),
     })
@@ -217,7 +221,7 @@ _section("MODUL 3 | KAPITÁLOVÝ POŽADOVEK — SPREADOVÉ RIZIKO (SCR_spread)")
 
 # Spuštění výpočtu spreadového rizika z Modulu 3:
 # Projde všechna aktiva a spočítá zátěž = Market_Value * min(base_factor * ModD, 1.0)
-sp = scr_spread(ASSETS)
+sp = scr_spread(ASSETS, base_curve)
 
 # Vytiskne rozpad spreadového rizika po jednotlivých dluhopisových pozicích do konzole
 print(f"\n  {'Dluhopis':<40}  {'Rating':<6}  {'Mod.Dur':>7}  {'Faktor':>8}  {'Kap. Zátěž (KCZK)':>14}")
@@ -241,8 +245,10 @@ _section("MODUL 3 | AGREGACE TRŽNÍHO RIZIKA A SOLVENČNÍ POMĚR (Solvency Rat
 scr_ir_val = ir["scr_ir"]
 scr_sp_val = sp["scr_spread_total"]
 
-# 1. Agregace tržních rizik přes variančně-kovarianční matici - Pro nás platí korelace = 0.0 vzorec se redukuje na Pythagorovu větu.
-scr_mkt    = aggregate_scr(scr_ir_val, scr_sp_val)
+# 1. Agregace tržních rizik přes variančně-kovarianční matici dle čl. 164(2) (EU) 2015/35:
+# Při dominanci scénáře DOWN platí ρ = 0.50 (při scénáři UP platí ρ = 0.00).
+rho_val    = get_ir_spread_correlation(ir["dominant_scenario"])
+scr_mkt    = aggregate_scr(scr_ir_val, scr_sp_val, rho=rho_val)
 
 # 2. Výpočet Solvenčního poměru (Solvency Ratio = Own Funds / SCR)
 sr         = solvency_ratio(bs["own_funds"], scr_mkt)
@@ -255,9 +261,9 @@ status     = "✅  COMPLIANT (Plní požadavky)" if sr >= 1.0 else "❌  NON-COM
 
 # Vytiskne finální přehledový dashboard Pilíře 1 do konzole
 print(f"""
-  Agregační vzorec (Variančně-kovarianční matice):
+  Agregační vzorec (Variančně-kovarianční matice, Art. 164(2), ρ = {rho_val:.2f}):
     SCR_market = √( SCR_ir²  +  SCR_spread²  +  2·ρ·SCR_ir·SCR_spread )
-               = √( {scr_ir_val:.1f}² + {scr_sp_val:.1f}² + 2·0·{scr_ir_val:.1f}·{scr_sp_val:.1f} )
+               = √( {scr_ir_val:.1f}² + {scr_sp_val:.1f}² + 2·{rho_val:.2f}·{scr_ir_val:.1f}·{scr_sp_val:.1f} )
 
   ┌─────────────────────────────────────────────────────────┐
   │  KOMPONENTA           │  HODNOTA (KCZK)                 │

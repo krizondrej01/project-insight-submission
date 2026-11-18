@@ -54,7 +54,7 @@ class FlatYieldCurve:
         """df(t) = 1 / (1 + r)^t"""
         if tenor <= 0:
             return 1.0
-        return 1.0 / (1.0 + self.rate) ** tenor
+        return 1.0 / (1.0 + self.spot_rate(tenor)) ** tenor
     #Net present value
 
 
@@ -140,7 +140,7 @@ class LiabilityValuation:
         self.curve = curve
 
     def value(self, liab: Liability) -> dict:
-        """Compute BEL, Macaulay duration, and cash flow schedule for the policy group."""
+        """Compute BEL, Macaulay & Modified duration, and cash flow schedule for the policy group."""
         T       = liab.remaining_term
         age0    = liab.age
         lapse   = liab.lapse_rate
@@ -155,9 +155,8 @@ class LiabilityValuation:
         #tady budou uloženy časové řady peněžních toků - zatím prázdná řada
         bel     = 0.0
         #celková diskontovaná hodnota pasiv
-        pv_abs_weighted_sum = 0.0
-        pv_abs_sum          = 0.0
-        #akumulační proměnná pro výpočet durace
+        pv_weighted_sum = 0.0
+        #akumulační proměnná pro výpočet Macaulayovy durace BEL (se znaménkem)
 
         for t in range(1, T + 1):
             #smyčka přes časové období t=1,...,T
@@ -187,8 +186,7 @@ class LiabilityValuation:
             pv_t   = net_cf_t * df_t #PV daného roku
             bel   += pv_t #sčítáme PV do BEL
 
-            pv_abs_weighted_sum += t * abs(pv_t) # vážený součet PV pro výpočet durace
-            pv_abs_sum          += abs(pv_t) # součet PV pro výpočet durace
+            pv_weighted_sum += t * pv_t # časově vážený součet PV se znaménkem pro Macaulayovu duraci BEL
 
             rows.append({
                 "year":          t,
@@ -205,9 +203,15 @@ class LiabilityValuation:
 
             active = max(survivors, 0.0)
 
-        duration = (pv_abs_weighted_sum / pv_abs_sum) if pv_abs_sum > 0 else 0.0
+        duration     = (pv_weighted_sum / bel) if abs(bel) > 1e-9 else 0.0
+        mod_duration = duration / (1.0 + self.curve.spot_rate(T)) if abs(bel) > 1e-9 else 0.0
 
-        return {"bel": bel, "duration": duration, "cf_schedule": rows}
+        return {
+            "bel":          bel,
+            "duration":     duration,
+            "mod_duration": mod_duration,
+            "cf_schedule":  rows,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +220,8 @@ class LiabilityValuation:
 
 class AssetValuation:
     """
-    Re-prices bond portfolio dynamically using the yield curve.
+    Re-prices bond portfolio dynamically using the yield curve plus each bond's
+    constant credit spread: df_t = 1 / (1 + r_f(t) + s)^t.
     Ensures 100 % consistency between baseline and stressed balance sheets.
     """
 
@@ -224,15 +229,21 @@ class AssetValuation:
         self.curve = curve
 
     def price_bond(self, bond: Bond) -> float:
-        """Compute present value of bond cash flows (in KCZK)."""
+        """
+        Compute present value of bond cash flows (in KCZK), discounting at the
+        risk-free spot rate r_f(t) plus the bond's constant credit spread s.
+        """
         F = bond.face_value #jmenovitá hodnota dluhopisu
         c = bond.coupon_rate #kuponová sazba v %
         T = int(round(bond.maturity_years)) #doba do splatnosti
+        s = getattr(bond, "credit_spread", 0.0) #kreditní přirážka (spread) emitenta
 
         pv = 0.0
         for t in range(1, T + 1):
-            cf = c * F if t < T else (c + 1.0) * F  # Coupon vs Principal + Coupon
-            pv += cf * self.curve.discount_factor(t)
+            cf   = c * F if t < T else (c + 1.0) * F  # Coupon vs Principal + Coupon
+            r_t  = self.curve.spot_rate(t)
+            df_t = 1.0 / (1.0 + r_t + s) ** t
+            pv  += cf * df_t
         return pv
 
     def portfolio_value(self, bonds: list) -> float:

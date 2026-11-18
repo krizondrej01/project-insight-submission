@@ -1,0 +1,6 @@
+name,issuer_type,rating,face_value_kczk,coupon_pct,credit_spread_bps,maturity_yr,market_price,market_value_kczk,model_value_kczk
+CZ Govt 3.5 % 2034,GOVT,AA,50000.0,3.50%,0.0,8.0,100.0,50000.0,50000.0
+DE Govt 2.5 % 2032,GOVT,AAA,30000.0,2.50%,0.0,6.0,94.6714,28401.43,28401.43
+Komerční Banka Covered 3.8 % 2031,COVERED,AA,20000.0,3.80%,25.0,5.0,100.2242,20044.83,20044.83
+ČEZ Corp A 4.2 % 2038,CORP,A,15000.0,4.20%,55.0,12.0,101.4037,15210.55,15210.55
+Slovak Telekom BBB 5.1 % 2030,CORP,BBB,10000.0,5.10%,160.0,4.0,100.0,10000.0,10000.0
